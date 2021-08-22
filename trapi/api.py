@@ -1,5 +1,7 @@
 from ecdsa import NIST256p, SigningKey
 from ecdsa.util import sigencode_der
+from typing import Callable
+
 import base64
 import hashlib
 import time
@@ -33,7 +35,7 @@ class TRApi:
 
         self.latest_response = {}
 
-    def register_new_device(self, processId=None):
+    def register_new_device(self, processId=None, pin_callback: Callable[[], str] = None):
         self.signing_key = SigningKey.generate(curve=NIST256p, hashfunc=hashlib.sha512)
         if processId is None:
             r = requests.post(
@@ -46,11 +48,12 @@ class TRApi:
             processId = r.json()["processId"]
             print(f"The process id is: {processId}")
 
+        token = input("Enter your token: ") if pin_callback is None else pin_callback()
+        print("Finished fetching PIN for registering new device. Entered PIN: " + token)
+
         pubkey = base64.b64encode(
             self.signing_key.get_verifying_key().to_string("uncompressed")
         ).decode("ascii")
-
-        token = input("Enter your token: ")
 
         r = requests.post(
             f"{self.url}/api/v1/auth/account/reset/device/{processId}/key",
@@ -66,22 +69,19 @@ class TRApi:
         else:
             print("no")
 
-    def login(self, **kwargs):
+    def login_request(self):
+        return self.do_request(
+            "/api/v1/auth/login",
+            payload={"phoneNumber": self.number, "pin": self.pin},
+        )
 
-        res = None
-        if os.path.isfile("key"):
-            res = self.do_request(
-                "/api/v1/auth/login",
-                payload={"phoneNumber": self.number, "pin": self.pin},
-            )
+    def login(self, pin_callback=None):
+        res = self.login_request() if os.path.isfile("key") else None
 
         # The user is currently signed in with a different device
-        if res == None or (
-            res.status_code == 401
-            and not kwargs.get("already_tried_registering", False)
-        ):
-            self.register_new_device()
-            res = self.login(already_tried_registering=True)
+        if res is None or res.status_code == 401:
+            self.register_new_device(pin_callback=pin_callback)
+            res = self.login_request()
 
         if res.status_code != 200:
             print(res.json(), res.status_code)
