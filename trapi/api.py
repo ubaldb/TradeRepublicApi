@@ -23,6 +23,7 @@ class TRApi:
         self.locale = locale
         self.signing_key = None
         self.ws = None
+        self.pin_callback = None
         self.sessionToken = None
         self.refreshToken = None
         self.mu = asyncio.Lock()
@@ -76,26 +77,44 @@ class TRApi:
             payload={"phoneNumber": self.number, "pin": self.pin},
         )
 
-    def login(self, pin_callback=None):
-        res = self.login_request() if os.path.isfile("key") else None
+    def web_login_request(self, pin_callback: Callable[[], str] = None):
+        res = self.do_request("/api/v1/auth/web/login", payload={"phoneNumber": self.number, "pin": self.pin})
 
-        # The user is currently signed in with a different device
-        if res is None or res.status_code == 401:
-            self.register_new_device(pin_callback=pin_callback)
-            res = self.login_request()
+        process_id = res.json()['processId']
+        if process_id is None:
+            raise Exception("process_id is undefined")
 
-        if res.status_code != 200:
-            print(res.json(), res.status_code)
-            raise Exception
+        pin = input("Enter your PIN: ") if pin_callback is None else pin_callback()
+        if pin is None:
+            raise Exception("process_id or pin is undefined")
 
-        data = res.json()
-        self.refreshToken = data["refreshToken"]
-        self.sessionToken = data["sessionToken"]
+        return requests.post(f"{self.url}/api/v1/auth/web/login/{process_id}/{pin}")
 
-        if data["accountState"] != "ACTIVE":
-            raise Exception("Account not active")
+    def login(self, pin_callback=None, web_login=False):
+        self.pin_callback = pin_callback
+        if web_login:
+            res = self.web_login_request(pin_callback=pin_callback)
+            self.sessionToken = res.cookies['tr_session']
+            self.refreshToken = res.cookies['tr_refresh']
 
-        return res
+        else:
+            res = self.login_request() if os.path.isfile("key") else None
+
+            # The user is currently signed in with a different device
+            if res is None or res.status_code == 401:
+                self.register_new_device(pin_callback=pin_callback)
+                res = self.login_request()
+
+            if res.status_code != 200:
+                print(res.json(), res.status_code)
+                raise Exception
+
+            data = res.json()
+            self.refreshToken = data["refreshToken"]
+            self.sessionToken = data["sessionToken"]
+
+            if data["accountState"] != "ACTIVE":
+                raise Exception("Account not active")
 
     async def sub(self, payload_key, callback, **kwargs):
         if self.ws is None:
@@ -233,15 +252,15 @@ class TRApi:
         )
 
     async def limit_order(
-        self,
-        order_id,
-        isin,
-        order_type,
-        size,
-        limit,
-        expiry,
-        exchange="LSX",
-        callback=print,
+            self,
+            order_id,
+            isin,
+            order_type,
+            size,
+            limit,
+            expiry,
+            exchange="LSX",
+            callback=print,
     ):
 
         if expiry not in ["gfd", "gtd", "gtc"]:
@@ -327,7 +346,8 @@ class TRApi:
             elif state == "A":
                 pass
             else:
-                print("Unrecognized state ", state, " data ", data)
+                if state != "C" and data != []:
+                    print("Unrecognized state ", state, " data ", data)
                 continue
 
             if isinstance(data, list):
